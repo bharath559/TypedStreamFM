@@ -8,6 +8,10 @@ import PackageDescription
 
 let package = Package(
     name: "TypedStreamFM",
+    platforms: [
+        .macOS(.v15),
+        .iOS(.v18),
+    ],
     products: [
         .library(name: "TypedStreamCore", targets: ["TypedStreamCore"]),
         .library(name: "TypedStreamTestKit", targets: ["TypedStreamTestKit"]),

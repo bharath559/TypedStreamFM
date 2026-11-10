@@ -48,10 +48,12 @@ extension FakeLanguageModel {
                     while !Task.isCancelled {
                         try? await Task.sleep(for: .seconds(30))
                     }
-                    onCancel()
                     continuation.finish()
                 }
-                continuation.onTermination = { _ in task.cancel() }
+                continuation.onTermination = { _ in
+                    task.cancel()
+                    onCancel()
+                }
             }
         }
     }

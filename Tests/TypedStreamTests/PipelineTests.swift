@@ -126,6 +126,43 @@ struct PipelineTests {
         #expect(await probe.marked)
     }
 
+    @Test func validatorCancellationPropagatesInsteadOfRepairing() async throws {
+        let fake = FakeLanguageModel<String, String>.scripted(partials: [], final: "ok")
+        let pipeline = TypedStreamPipeline(
+            provider: fake.provider(),
+            validate: { _ in throw CancellationError() }
+        )
+
+        var repairingCount = 0
+        do {
+            for try await event in await pipeline.stream(prompt: "go") {
+                if case .repairing = event { repairingCount += 1 }
+            }
+            Issue.record("expected CancellationError, stream completed")
+        } catch is CancellationError {
+            // Expected: CancellationError from validator escapes without entering repair.
+        }
+        #expect(repairingCount == 0)
+    }
+
+    @Test func concurrentStreamsAreRejected() async throws {
+        let fake = FakeLanguageModel<String, String>.hanging()
+        let pipeline = TypedStreamPipeline(provider: fake.provider(), validate: { _ in })
+
+        let firstConsumer = Task {
+            for try await _ in await pipeline.stream(prompt: "first") {}
+        }
+        defer { firstConsumer.cancel() }
+        try await Task.sleep(for: .milliseconds(50))
+
+        do {
+            for try await _ in await pipeline.stream(prompt: "second") {}
+            Issue.record("expected StructuredOutputError, second stream completed")
+        } catch is StructuredOutputError {
+            // Expected: concurrent stream(prompt:) call is rejected.
+        }
+    }
+
     // MARK: - Backpressure / invariants
 
     @Test func partialCoverageIsMonotonic() async throws {

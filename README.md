@@ -69,13 +69,13 @@ docs/cancellation.md          # the cancellation design, as an RFC
 docs/decoding-strategy.md     # v1 native partials vs prefix-decode fallback
 ```
 
-## M0 checklist — confirm in Xcode 27 before shipping
+## M0 checklist — verified against Xcode 27 / macOS 26+ SDK
 
-- [ ] `streamResponse(to:generating:)` shape: snapshots' `.content == T.PartiallyGenerated`
-- [ ] `stream.collect()` after full iteration returns the final `Response<T>`
-- [ ] `LanguageModelSession` `Sendable` status (see `UncheckedSession` in the adapter)
-- [ ] `T.PartiallyGenerated` `Sendable` status (see the generic constraint)
-- [ ] Cancellation behavior of an in-flight `streamResponse`
+- [x] `streamResponse(to:generating:)` shape: snapshots' `.content == T.PartiallyGenerated`
+- [x] `stream.collect()` after full iteration returns the final `Response<T>`
+- [x] `LanguageModelSession` `Sendable` status (`@unchecked Sendable` in `FoundationModels`)
+- [x] `T.PartiallyGenerated` `Sendable` status (constrained on `provider(session:)`)
+- [ ] Cancellation behavior of an in-flight `streamResponse` on live hardware
 
 ## Naming
 

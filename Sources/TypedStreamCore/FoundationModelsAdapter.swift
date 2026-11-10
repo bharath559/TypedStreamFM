@@ -1,36 +1,39 @@
 #if canImport(FoundationModels)
 import FoundationModels
 
-// MARK: - M0 verification checklist (confirm in Xcode 27 before shipping)
+// MARK: - M0 verification checklist (confirmed against Xcode 27 / macOS 26+ SDK)
 //
 // 1. `LanguageModelSession.streamResponse(to:generating:)` exists with the
 //    shape used below, and the response stream is an AsyncSequence whose
 //    snapshots expose `.content: Output.PartiallyGenerated`.
 // 2. Calling `stream.collect()` after fully iterating the stream returns the
 //    final `Response<Output>` (iterate-then-collect pattern).
-// 3. `LanguageModelSession` Sendable status — see UncheckedSession.
+// 3. `LanguageModelSession` conforms to `@unchecked Sendable` in FoundationModels.
 // 4. `Output.PartiallyGenerated` Sendable status — see the generic
 //    constraint on `provider(session:)`.
 
-/// Documents the v1 ownership contract: the pipeline actor is the sole owner
-/// of the session and never touches it concurrently. If M0 shows the session
-/// is `Sendable`, delete this wrapper and capture the session directly.
-private struct UncheckedSession: @unchecked Sendable {
-    let session: LanguageModelSession
-}
-
-/// Best-effort coverage: fraction of non-nil fields on the partial.
+/// Best-effort coverage: fraction of non-nil fields on the partial (recursively
+/// evaluating nested structs).
 /// `PartiallyGenerated` is all-Optional by construction, so this is the
 /// fraction of fields the model has produced so far.
 private func coverage<Partial>(of partial: Partial) -> Double {
-    let children = Array(Mirror(reflecting: partial).children)
-    guard !children.isEmpty else { return 1.0 }
-    let filled = children.filter { _, value in
-        let valueMirror = Mirror(reflecting: value)
-        guard valueMirror.displayStyle == .optional else { return true }
-        return valueMirror.children.first != nil
-    }.count
-    return Double(filled) / Double(children.count)
+    fieldCoverage(partial)
+}
+
+private func fieldCoverage(_ value: Any) -> Double {
+    let mirror = Mirror(reflecting: value)
+    switch mirror.displayStyle {
+    case .optional:
+        guard let unwrapped = mirror.children.first?.value else { return 0.0 }
+        return fieldCoverage(unwrapped)
+    case .struct:
+        let children = Array(mirror.children)
+        guard !children.isEmpty else { return 1.0 }
+        let total = children.reduce(0.0) { $0 + fieldCoverage($1.value) }
+        return total / Double(children.count)
+    default:
+        return 1.0
+    }
 }
 
 /// Native structured-partials provider — the v1 decoding strategy.
@@ -45,12 +48,11 @@ public enum FoundationModelsProvider {
     ) -> StreamProvider<Output.PartiallyGenerated, Output>
     where Output: Generable & Sendable, Output.PartiallyGenerated: Sendable
     {
-        let unchecked = UncheckedSession(session: session)
-        return StreamProvider { prompt in
+        StreamProvider { prompt in
             AsyncThrowingStream { continuation in
                 let task = Task {
                     do {
-                        let stream = unchecked.session.streamResponse(to: prompt, generating: Output.self)
+                        let stream = session.streamResponse(to: prompt, generating: Output.self)
                         for try await snapshot in stream {
                             try Task.checkCancellation()
                             let partial = snapshot.content

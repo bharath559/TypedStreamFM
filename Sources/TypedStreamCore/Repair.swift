@@ -3,6 +3,7 @@
 /// All timeouts are implemented as cancellation races — a timed-out attempt is
 /// cancelled, never orphaned. See `docs/cancellation.md`.
 public struct RepairBudget: Sendable {
+    /// Maximum number of repair retries after the initial generation attempt.
     public var maxAttempts: Int
     public var attemptTimeout: Duration
     public var totalTimeout: Duration

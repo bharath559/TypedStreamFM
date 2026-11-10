@@ -38,6 +38,55 @@ private actor StreamState {
     }
 }
 
+/// The `AsyncSequence` returned by ``TypedStreamPipeline/stream(prompt:)``.
+///
+/// Wraps `AsyncThrowingStream` so that consumer task cancellation throws
+/// `CancellationError` after awaiting producer teardown (Swift's standard
+/// `AsyncThrowingStream` resolves `next()` with `nil` on task cancellation).
+public struct TypedStream<Partial: Sendable, Output: Sendable>: AsyncSequence, Sendable {
+    public typealias Element = StreamEvent<Partial, Output>
+    public typealias Failure = any Error
+
+    private let rawStream: AsyncThrowingStream<StreamEvent<Partial, Output>, Error>
+    private let producerTask: Task<Void, Never>
+
+    init(
+        rawStream: AsyncThrowingStream<StreamEvent<Partial, Output>, Error>,
+        producerTask: Task<Void, Never>
+    ) {
+        self.rawStream = rawStream
+        self.producerTask = producerTask
+    }
+
+    public struct AsyncIterator: AsyncIteratorProtocol {
+        private var rawIterator: AsyncThrowingStream<StreamEvent<Partial, Output>, Error>.AsyncIterator
+        private let producerTask: Task<Void, Never>
+
+        init(
+            rawIterator: AsyncThrowingStream<StreamEvent<Partial, Output>, Error>.AsyncIterator,
+            producerTask: Task<Void, Never>
+        ) {
+            self.rawIterator = rawIterator
+            self.producerTask = producerTask
+        }
+
+        public mutating func next() async throws -> StreamEvent<Partial, Output>? {
+            let element = try await rawIterator.next()
+            if element == nil, Task.isCancelled {
+                producerTask.cancel()
+                await producerTask.value
+                await Task.yield()
+                throw CancellationError()
+            }
+            return element
+        }
+    }
+
+    public func makeAsyncIterator() -> AsyncIterator {
+        AsyncIterator(rawIterator: rawStream.makeAsyncIterator(), producerTask: producerTask)
+    }
+}
+
 /// Typed, streaming, self-repairing structured output.
 ///
 /// An actor so the provider/session, budget state, and attempt counter are
@@ -50,6 +99,7 @@ public actor TypedStreamPipeline<Partial: Sendable, Output: Sendable> {
     private let provider: StreamProvider<Partial, Output>
     private let validate: Validator<Output>
     private let budget: RepairBudget
+    private var isStreaming = false
 
     public init(
         provider: StreamProvider<Partial, Output>,
@@ -66,31 +116,37 @@ public actor TypedStreamPipeline<Partial: Sendable, Output: Sendable> {
     /// Terminal-event guarantee: the stream always ends with exactly one of
     /// `.validated` (yielded), a `StructuredOutputError` (thrown), or
     /// `CancellationError` (thrown) — never a silent hang.
-    ///
-    /// Backpressure: latest-wins (`.bufferingNewest(1)`). This is safe because
-    /// partials are idempotent snapshots with monotonic coverage, and
-    /// `.validated` / terminal errors are never droppable.
-    public func stream(prompt: String) -> AsyncThrowingStream<StreamEvent<Partial, Output>, Error> {
-        AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
-            let task = Task {
-                do {
-                    try await self.run(prompt: prompt, continuation: continuation)
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
+    public func stream(prompt: String) -> TypedStream<Partial, Output> {
+        let (rawStream, continuation) = AsyncThrowingStream<StreamEvent<Partial, Output>, Error>.makeStream(
+            bufferingPolicy: .unbounded
+        )
+        let task = Task {
+            do {
+                try await self.run(prompt: prompt, continuation: continuation)
+                continuation.finish()
+            } catch {
+                continuation.finish(throwing: error)
             }
-            // The bridge: AsyncSequence doesn't propagate cancellation, so the
-            // stream boundary does it explicitly. Consumer gone => producer
-            // cancelled => CancellationError surfaces to the consumer.
-            continuation.onTermination = { _ in task.cancel() }
         }
+        // The bridge: AsyncSequence doesn't propagate cancellation, so the
+        // stream boundary does it explicitly. Consumer gone => producer
+        // cancelled => CancellationError surfaces to the consumer.
+        continuation.onTermination = { _ in task.cancel() }
+        return TypedStream(rawStream: rawStream, producerTask: task)
     }
 
     private func run(
         prompt: String,
         continuation: AsyncThrowingStream<StreamEvent<Partial, Output>, Error>.Continuation
     ) async throws {
+        guard !isStreaming else {
+            throw StructuredOutputError.undecodable(
+                preview: "(concurrent stream(prompt:) call on active pipeline)"
+            )
+        }
+        isStreaming = true
+        defer { isStreaming = false }
+
         // Captured by value: the @Sendable operation below must not see
         // actor state or mutable locals.
         let provider = self.provider
@@ -109,10 +165,10 @@ public actor TypedStreamPipeline<Partial: Sendable, Output: Sendable> {
 
             let state = StreamState()
             let attemptPrompt = currentPrompt
-            var outcome: AttemptOutcome = .incomplete
+            let outcome: AttemptOutcome
 
             do {
-                try await self.withAttemptTimeout(min(budget.attemptTimeout, remaining)) {
+                outcome = try await self.withAttemptTimeout(min(budget.attemptTimeout, remaining)) {
                     for try await event in provider.events(attemptPrompt) {
                         try Task.checkCancellation()
                         switch event {
@@ -124,26 +180,28 @@ public actor TypedStreamPipeline<Partial: Sendable, Output: Sendable> {
                             do {
                                 try validate(output)
                                 continuation.yield(.validated(output))
-                                outcome = .validated
+                                return .validated
                             } catch let structured as StructuredOutputError {
-                                outcome = .invalid(structured, preview: preview)
+                                return .invalid(structured, preview: preview)
+                            } catch let cancellation as CancellationError {
+                                throw cancellation
                             } catch {
-                                outcome = .invalid(
+                                return .invalid(
                                     .undecodable(preview: "validator threw unexpected error: \(error)"),
                                     preview: preview
                                 )
                             }
-                            return
                         }
                     }
+                    return .incomplete
                 }
             } catch _ as AttemptTimedOut {
                 outcome = .invalid(
                     .undecodable(preview: "(attempt timed out)"),
                     preview: "(no output)"
                 )
-            } catch is CancellationError {
-                throw
+            } catch let error as CancellationError {
+                throw error
             }
             // A provider stream that ends (or is torn down by cancellation)
             // without a final value must surface cancellation, never
