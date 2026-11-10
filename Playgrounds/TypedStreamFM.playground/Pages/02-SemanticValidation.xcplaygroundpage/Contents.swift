@@ -35,10 +35,27 @@ do {
     print("rejected (unexpected): \(error)")
 }
 
-// 3. The error text becomes the next attempt's repair prompt:
+// 3. Composable KeyPath Check rules collect ALL violations in one pass:
+let movieCheck = Check.notBlank(\Movie.title)
+    && Check.greaterThanOrEqual(\Movie.year, 1900)
+
+do {
+    try movieCheck.validate(Movie(title: "", year: 1899))
+} catch let error as StructuredOutputError {
+    print("multi-violation rejected: \(error.description)")
+}
+
+// 4. The error text becomes the next attempt's repair prompt (full vs delta):
 print("---")
 print(repairPrompt(
     originalPrompt: "Recommend an action movie from the 2020s",
     invalidPreview: #"Movie(title: "Dune: Part Two", year: 1899)"#,
     error: .constraintViolated(path: "year", reason: "must be >= 1900")
+))
+print("---")
+print(deltaRepairPrompt(
+    error: .constraintsViolated([
+        ConstraintViolation(path: "title", reason: "must not be blank"),
+        ConstraintViolation(path: "year", reason: "must be >= 1900"),
+    ])
 ))

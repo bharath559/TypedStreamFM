@@ -5,11 +5,17 @@
 /// cancellation per yielded event — so the pipeline's terminal-event guarantee
 /// holds.
 public struct StreamProvider<Partial: Sendable, Output: Sendable>: Sendable {
+    /// The recommended repair prompt strategy for this provider's session
+    /// semantics (e.g. `.deltaPrompt` for a stateful `LanguageModelSession`,
+    /// `.fullPrompt` for stateless or fresh-session-per-attempt providers).
+    public let defaultRepairStrategy: RepairStrategy
     public let events: @Sendable (String) -> AsyncThrowingStream<ProviderEvent<Partial, Output>, Error>
 
     public init(
+        defaultRepairStrategy: RepairStrategy = .fullPrompt,
         events: @Sendable @escaping (String) -> AsyncThrowingStream<ProviderEvent<Partial, Output>, Error>
     ) {
+        self.defaultRepairStrategy = defaultRepairStrategy
         self.events = events
     }
 }
@@ -99,16 +105,49 @@ public actor TypedStreamPipeline<Partial: Sendable, Output: Sendable> {
     private let provider: StreamProvider<Partial, Output>
     private let validate: Validator<Output>
     private let budget: RepairBudget
+    private let repairStrategy: RepairStrategy
     private var isStreaming = false
 
     public init(
         provider: StreamProvider<Partial, Output>,
-        validate: @escaping Validator<Output>,
-        budget: RepairBudget = .default
+        validate: @escaping Validator<Output> = { _ in },
+        budget: RepairBudget = .default,
+        repairStrategy: RepairStrategy? = nil
     ) {
         self.provider = provider
         self.validate = validate
         self.budget = budget
+        self.repairStrategy = repairStrategy ?? provider.defaultRepairStrategy
+    }
+
+    /// Creates a pipeline using a composable ``Check`` rule.
+    public init(
+        provider: StreamProvider<Partial, Output>,
+        check: Check<Output>,
+        budget: RepairBudget = .default,
+        repairStrategy: RepairStrategy? = nil
+    ) {
+        self.init(
+            provider: provider,
+            validate: check.validator,
+            budget: budget,
+            repairStrategy: repairStrategy
+        )
+    }
+
+    /// Creates a pipeline that evaluates all `checks` in a single pass.
+    public init(
+        provider: StreamProvider<Partial, Output>,
+        checks: [Check<Output>],
+        budget: RepairBudget = .default,
+        repairStrategy: RepairStrategy? = nil
+    ) {
+        self.init(
+            provider: provider,
+            validate: Check.all(checks).validator,
+            budget: budget,
+            repairStrategy: repairStrategy
+        )
     }
 
     /// Streams events for a prompt.
@@ -151,6 +190,7 @@ public actor TypedStreamPipeline<Partial: Sendable, Output: Sendable> {
         // actor state or mutable locals.
         let provider = self.provider
         let validate = self.validate
+        let repairStrategy = self.repairStrategy
 
         var currentPrompt = prompt
         var attempt = 0
@@ -221,7 +261,7 @@ public actor TypedStreamPipeline<Partial: Sendable, Output: Sendable> {
                     error: structured,
                     failedPreview: preview
                 )))
-                currentPrompt = repairPrompt(
+                currentPrompt = repairStrategy.prompt(
                     originalPrompt: prompt,
                     invalidPreview: preview,
                     error: structured

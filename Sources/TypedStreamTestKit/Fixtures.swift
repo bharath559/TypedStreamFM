@@ -5,14 +5,22 @@ import TypedStreamCore
 public struct FakeLanguageModel<Partial: Sendable, Output: Sendable>: Sendable {
     public typealias Handler = @Sendable (String) -> AsyncThrowingStream<ProviderEvent<Partial, Output>, Error>
 
+    private let defaultRepairStrategy: RepairStrategy
     private let handler: Handler
 
-    public init(handler: @escaping Handler) {
+    public init(
+        defaultRepairStrategy: RepairStrategy = .fullPrompt,
+        handler: @escaping Handler
+    ) {
+        self.defaultRepairStrategy = defaultRepairStrategy
         self.handler = handler
     }
 
-    public func provider() -> StreamProvider<Partial, Output> {
-        StreamProvider(events: handler)
+    public func provider(repairStrategy: RepairStrategy? = nil) -> StreamProvider<Partial, Output> {
+        StreamProvider(
+            defaultRepairStrategy: repairStrategy ?? defaultRepairStrategy,
+            events: handler
+        )
     }
 }
 
@@ -93,4 +101,20 @@ public actor Probe {
 
     public func mark() { _marked = true }
     public var marked: Bool { _marked }
+}
+
+/// Test-side recorder for inspecting prompts sent across attempts or sessions.
+public actor PromptRecorder {
+    public private(set) var prompts: [String] = []
+    public private(set) var sessionCreations: Int = 0
+
+    public init() {}
+
+    public func record(prompt: String) {
+        prompts.append(prompt)
+    }
+
+    public func recordSessionCreated() {
+        sessionCreations += 1
+    }
 }

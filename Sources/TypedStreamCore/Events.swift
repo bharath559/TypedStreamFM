@@ -13,6 +13,8 @@ public enum StreamEvent<Partial: Sendable, Output: Sendable>: Sendable {
     case repairing(RepairAttempt)
 }
 
+extension StreamEvent: Equatable where Partial: Equatable, Output: Equatable {}
+
 /// A best-effort snapshot of the value being streamed.
 public struct PartialSnapshot<Value: Sendable>: Sendable {
     public let value: Value
@@ -25,8 +27,10 @@ public struct PartialSnapshot<Value: Sendable>: Sendable {
     }
 }
 
+extension PartialSnapshot: Equatable where Value: Equatable {}
+
 /// Observability payload for a repair attempt.
-public struct RepairAttempt: Sendable {
+public struct RepairAttempt: Sendable, Equatable {
     /// 1-based attempt number.
     public let index: Int
     public let error: StructuredOutputError
@@ -46,3 +50,5 @@ public enum ProviderEvent<Partial: Sendable, Output: Sendable>: Sendable {
     case partial(PartialSnapshot<Partial>)
     case final(Output)
 }
+
+extension ProviderEvent: Equatable where Partial: Equatable, Output: Equatable {}

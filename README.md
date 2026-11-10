@@ -21,12 +21,10 @@ import FoundationModels
 
 let session = LanguageModelSession()
 let pipeline = TypedStreamPipeline(
-    provider: FoundationModelsProvider.provider(session: session),
-    validate: { (movie: Movie) in
-        guard movie.year >= 1900 else {
-            throw StructuredOutputError.constraintViolated(path: "year", reason: "must be >= 1900")
-        }
-    },
+    provider: FoundationModelsProvider.provider(session: session), // defaults to .deltaPrompt for stateful sessions
+    check: Check.notBlank(\Movie.title)
+        && Check.greaterThanOrEqual(\Movie.year, 1900)
+        && Check.inRange(\Movie.rating, 1...10),
     budget: .default  // 3 attempts, 30s each, 90s total
 )
 
@@ -39,6 +37,43 @@ for try await event in await pipeline.stream(prompt: "Recommend an action movie 
 }
 // Cancelling the consumer task cancels generation AND any in-flight repair.
 // Guaranteed by construction — see docs/cancellation.md.
+```
+
+### Context-window-safe repair strategies
+
+On-device sessions have tight context windows (~4K tokens):
+
+- **Stateful session (`FoundationModelsProvider.provider(session:)`):** Reuses one `LanguageModelSession` whose transcript already holds the original prompt and previous response. Defaults to `RepairStrategy.deltaPrompt` (`deltaRepairPrompt(error:)`), sending only the validation error delta on retries.
+- **Fresh session per attempt (`FoundationModelsProvider.provider(makeSession:)`):** Creates a new `LanguageModelSession` per attempt so failed turns are discarded rather than accumulating in a shared transcript. Defaults to `RepairStrategy.fullPrompt` (`repairPrompt(originalPrompt:invalidPreview:error:)`).
+
+### SwiftUI integration (`TypedStreamController`)
+
+```swift
+import SwiftUI
+import TypedStreamCore
+
+@MainActor
+struct MovieRecommendationView: View {
+    @State var controller: TypedStreamController<Movie.PartiallyGenerated, Movie>
+
+    var body: some View {
+        VStack {
+            if let partial = controller.partial, controller.output == nil {
+                ProgressView(value: controller.coverage)
+                Text(partial.title ?? "Generating…")
+            }
+            if let attempt = controller.currentRepair, controller.isRepairing {
+                Text("Repairing (#\(attempt.index)): \(attempt.error.description)")
+            }
+            if let movie = controller.output {
+                Text("\(movie.title) (\(movie.year))")
+            }
+        }
+        .task {
+            await controller.run(prompt: "Recommend an action movie from the 2020s")
+        }
+    }
+}
 ```
 
 ## Playgrounds
